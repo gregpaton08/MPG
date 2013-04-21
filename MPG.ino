@@ -4,15 +4,27 @@
 #include "ble.h"
 #include "OBDLib.h"
 
-File OBDLog;
-unsigned long startTime;
-const uint8_t FILE_LEN = 13;
-
-OBDLib obd;
-
 #define SD_SS 4
 #define BLE_REQN 9
 #define MEGA_SS 53
+
+enum operatingMode {
+  OBD,
+  BLE
+};
+
+enum SPIMode {
+  sd,
+  ble,
+  unknown
+};
+
+File OBDLog;
+unsigned long startTime;
+const uint8_t FILE_LEN = 13;
+operatingMode opMode = OBD;
+SPIMode spiMode = unknown;
+OBDLib obd;
 
 
 void setup() {
@@ -25,9 +37,9 @@ void setup() {
   pinMode(SD_SS, OUTPUT);
   
   // Setup SD card
-  setSDActive();
   SDInit(); 
   
+  // Setup OBD
   obd.init(); 
   
   // Setup BLE
@@ -40,19 +52,15 @@ void setup() {
 
 
 void loop() {
-  // RPM
-  logMode01PID(0x0C);
-  // Speed
-  logMode01PID(0x0D);
-  // MAF
-  logMode01PID(0x10);
-  
-  // flush data to SD card
-  OBDLog.flush();
+  logPids();
 }
 
 
 void setSDActive() {
+  if (spiMode == sd)
+    return;
+  else
+    spiMode = sd;
   digitalWrite(BLE_REQN, HIGH);
   SPI.setDataMode(SPI_MODE0);
   SPI.setBitOrder(MSBFIRST);
@@ -62,11 +70,28 @@ void setSDActive() {
 
 
 void setBLEActive() {
+  if (spiMode == ble)
+    return;
+  else
+    spiMode = ble;
   digitalWrite(SD_SS, HIGH);
   SPI.setDataMode(SPI_MODE0);
   SPI.setBitOrder(LSBFIRST);
   SPI.setClockDivider(SPI_CLOCK_DIV16);
   digitalWrite(BLE_REQN, LOW);
+}
+
+void logPids() {
+  setSDActive();
+  // RPM
+  logMode01PID(0x0C);
+  // Speed
+  logMode01PID(0x0D);
+  // MAF
+  logMode01PID(0x10);
+  
+  // flush data to SD card
+  OBDLog.flush();
 }
 
 
@@ -99,10 +124,7 @@ void checkForBLE() {
 
 
 void SDInit() {
-  // Set up Serial Peripheral Interface for SD
-  SPI.setDataMode(SPI_MODE0);
-  SPI.setBitOrder(MSBFIRST);
-  SPI.setClockDivider(SPI_CLOCK_DIV4);
+  setSDActive();
   
   // Set slave select pin for SD Card
   pinMode(SD_SS, OUTPUT);
