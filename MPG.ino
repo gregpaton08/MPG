@@ -8,9 +8,16 @@
 #define BLE_REQN 9
 #define MEGA_SS 53
 
+// Debug pins
+#define SD_DB 22
+#define OBD_DB 23
+
+#define OBD_TIMEOUT 150
+
 enum operatingMode {
   OBD,
-  BLE
+  BLE, 
+  UNKNOWN
 };
 
 enum SPIMode {
@@ -22,7 +29,7 @@ enum SPIMode {
 File OBDLog;
 unsigned long startTime;
 const uint8_t FILE_LEN = 13;
-operatingMode opMode = OBD;
+operatingMode opMode = UNKNOWN;
 SPIMode spiMode = unknown;
 OBDLib obd;
 
@@ -35,16 +42,23 @@ void setup() {
   // Setup pins
   pinMode(BLE_REQN, OUTPUT);
   pinMode(SD_SS, OUTPUT);
-  
-  // Setup SD card
-  SDInit(); 
-  
-  // Setup OBD
-  obd.init(); 
+  pinMode(SD_DB, OUTPUT);
+  pinMode(OBD_DB, OUTPUT);
   
   // Setup BLE
   setBLEActive();
   ble_begin();
+  
+  // Setup SD card
+  digitalWrite(SD_DB, HIGH);
+  while (false == SDInit()); 
+  digitalWrite(SD_DB, LOW);
+  
+  // Setup OBD
+  digitalWrite(OBD_DB, HIGH);
+  obd.init(OBDLog); 
+  opMode = OBD;
+  digitalWrite(OBD_DB, LOW);
   
   // Keep track of start time
   startTime = millis();
@@ -53,14 +67,15 @@ void setup() {
 
 void loop() {
   logPids();
+  
+  checkForBLE();
 }
 
 
 void setSDActive() {
   if (spiMode == sd)
     return;
-  else
-    spiMode = sd;
+  spiMode = sd;
   digitalWrite(BLE_REQN, HIGH);
   SPI.setDataMode(SPI_MODE0);
   SPI.setBitOrder(MSBFIRST);
@@ -72,8 +87,7 @@ void setSDActive() {
 void setBLEActive() {
   if (spiMode == ble)
     return;
-  else
-    spiMode = ble;
+  spiMode = ble;
   digitalWrite(SD_SS, HIGH);
   SPI.setDataMode(SPI_MODE0);
   SPI.setBitOrder(LSBFIRST);
@@ -82,13 +96,22 @@ void setBLEActive() {
 }
 
 void logPids() {
+  if (opMode != OBD)
+    return;
+    
   setSDActive();
+  
   // RPM
-  logMode01PID(0x0C);
+  if (false == logMode01PID(0x0C))
+    return;
+  
   // Speed
-  logMode01PID(0x0D);
+  if (false == logMode01PID(0x0D))
+    return;
+  
   // MAF
-  logMode01PID(0x10);
+  if (false == logMode01PID(0x10))
+    return;
   
   // flush data to SD card
   OBDLog.flush();
@@ -97,38 +120,53 @@ void logPids() {
 
 void checkForBLE() {
   char c = -1;
+  
+  setBLEActive();
+  
   if (ble_available() > 0) {
     c = ble_read();
     if (c == -1) {
       return;
     }
+    // Exit BLE mode
+    else if (c == 'x') {
+      writeToBLE("EXIT\n");
+      opMode = OBD;
+    }
+    // Start BLE mode
+    else if (c == 's') {
+      writeToBLE("START\n");
+      opMode = BLE;  
+    }
+    // List files
     else if (c == 'l') {
       listFiles();
       setBLEActive();
     }
+    // Open
     else if (c == 'o') {
       BLEopenFile(OBDLog);
     }
+    // Read line
     else if (c == 'r') {
       BLEreadLine(OBDLog);
     }
+    // Delete
     else if (c == 'd') {
       BLEdeleteFile();
-    }
-    else {
-      return;
     }
   }
   ble_do_events();
 }
 
 
-void SDInit() {
+boolean SDInit() {
   setSDActive();
   
   // Set slave select pin for SD Card
   pinMode(SD_SS, OUTPUT);
-  if (false == SD.begin(SD_SS)) return;
+  if (false == SD.begin(SD_SS)) 
+    return false;
  
   // Determine file name
   // File name must be 8 characters or less
@@ -142,6 +180,8 @@ void SDInit() {
   
   // Open file
   OBDLog = SD.open(filename, FILE_WRITE);
+  
+  return OBDLog;
 }
 
 
@@ -156,7 +196,7 @@ void BLEInit() {
 }
 
 
-void logMode01PID(byte pid) {
+boolean logMode01PID(byte pid) {
   uint8_t len = 0;
   uint8_t pidResSize = 10;
   char pidRes[pidResSize];
@@ -172,7 +212,15 @@ void logMode01PID(byte pid) {
       strPidtemp = "0" + strPidtemp;
   }
   strPidtemp.toCharArray(strPid, strPidSize);
-  while (false == Serial.find(strPid));
+  
+  while (true) {
+    if (Serial.find(strPid))
+      break;
+    if (Serial.find("UNABLE TO CONNECT")) {
+      opMode = UNKNOWN;
+      return false;
+    }
+  }
     
   // Print time 
   OBDLog.print(millis() - startTime);
@@ -193,6 +241,8 @@ void logMode01PID(byte pid) {
   }
   // print result to 2 decimal places
   OBDLog.println(obd.pidToDec(pid, pidRes), 2);
+  
+  return true;
 }
 
 
@@ -230,6 +280,9 @@ boolean BLEopenFile(File &file) {
   char name[FILE_LEN];
   uint8_t cnt = 0;
   
+  if (file)
+    file.close();
+  
   while (ble_available() > 0 && cnt < FILE_LEN) {
     name[cnt] = ble_read();
     if (name[cnt] < 46) {
@@ -250,7 +303,7 @@ boolean BLEopenFile(File &file) {
   if (ret) 
     writeToBLE("OPEN\n");
   else     
-    writeToBLE("FAIL\n");
+    writeToBLE("OPENFAIL\n");
   
   return ret;
 }
@@ -275,7 +328,7 @@ boolean BLEreadLine(File &file) {
         line[cnt] = '\0';
         writeToBLE(line);
       }
-      writeToBLE("\nEOF\n");
+      writeToBLE("EOF\n");
       return false;
     }
     else if (line[cnt] == '\n') {
@@ -288,7 +341,7 @@ boolean BLEreadLine(File &file) {
   if (cnt > 0)
     writeToBLE(line);
   else if (false == ret) 
-    writeToBLE("FAIL\n");
+    writeToBLE("READFAIL\n");
   
   return true;
 }
@@ -320,3 +373,4 @@ boolean BLEdeleteFile() {
     
   return ret;
 }
+
